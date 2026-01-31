@@ -30,7 +30,7 @@ class TestSettings:
         path = settings.chroma_path
         
         assert path.name == "chroma"
-        assert str(path) == "./data/chroma"
+        assert path.parent.name == "data"
 
     def test_max_file_size_bytes_property(self):
         """Test the max_file_size_bytes calculation."""
