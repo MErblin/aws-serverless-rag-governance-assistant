@@ -75,18 +75,6 @@ async def health_check() -> HealthResponse:
 async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
     """
     Upload a document for processing and indexing.
-    
-    Accepts PDF and TXT files up to 10MB.
-    The document will be parsed, chunked, and stored in the vector database.
-    
-    Args:
-        file: The document file to upload.
-        
-    Returns:
-        UploadResponse with document ID and status.
-        
-    Raises:
-        HTTPException: If file type is unsupported or file is too large.
     """
     # Validate file type
     allowed_types = [".pdf", ".txt"]
@@ -107,34 +95,35 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
             detail=f"File too large. Maximum size: {settings.max_file_size_mb}MB",
         )
     
-    # TODO: Implement actual document processing in Sprint 2
-    # For now, return a placeholder response
-    import hashlib
-    document_id = hashlib.md5(contents).hexdigest()[:12]
-    
-    return UploadResponse(
-        message="Document uploaded successfully (processing not yet implemented)",
-        document_id=document_id,
-        filename=filename,
-    )
+    try:
+        from app.services.ingestion import IngestionService
+        service = IngestionService()
+        document_id = await service.process_document(contents, filename)
+        
+        return UploadResponse(
+            message="Document uploaded and indexed successfully",
+            document_id=document_id,
+            filename=filename,
+        )
+    except Exception as e:
+        print(f"Error processing document: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/query", response_model=QueryResponse)
 async def query_documents(request: QueryRequest) -> QueryResponse:
     """
     Query the indexed documents.
-    
-    Uses RAG pipeline to retrieve relevant context and generate an answer.
-    
-    Args:
-        request: The query request containing the question.
-        
-    Returns:
-        QueryResponse with the generated answer and source references.
     """
-    # TODO: Implement actual RAG query in Sprint 3
-    # For now, return a placeholder response
-    return QueryResponse(
-        answer=f"RAG query not yet implemented. You asked: '{request.question}'",
-        sources=[],
-    )
+    try:
+        from app.services.rag import RAGService
+        service = RAGService()
+        answer, sources = await service.query(request.question)
+        
+        return QueryResponse(
+            answer=answer,
+            sources=sources,
+        )
+    except Exception as e:
+        print(f"Error querying documents: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
