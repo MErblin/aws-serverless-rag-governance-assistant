@@ -7,6 +7,17 @@
 ![LlamaIndex](https://img.shields.io/badge/LlamaIndex-0.10+-orange.svg)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
+## 🤔 What is DocuChat?
+
+**DocuChat lets you chat with your documents.** Upload any PDF or text file, ask questions in plain English, and get answers based on what's inside your document.
+
+**Example:** Upload a 50-page employee handbook → Ask "What's the vacation policy?" → Get the answer instantly.
+
+**Why use it?**
+- 🔒 Runs 100% on your computer (your documents stay private)
+- 🆓 No API keys or subscriptions needed
+- 📴 Works offline once set up
+
 ## ✨ Features
 
 - 📄 **Upload Documents** — Support for PDF and TXT files
