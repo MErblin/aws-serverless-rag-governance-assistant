@@ -100,6 +100,16 @@ class HealthResponse(BaseModel):
     version: str
 
 
+class EvalCase(BaseModel):
+    question: str = Field(..., min_length=1, max_length=1000)
+    expected_keywords: list[str] = Field(default_factory=list)
+
+
+class EvalRequest(BaseModel):
+    cases: list[EvalCase] = Field(default_factory=list)
+    include_diagnostics: bool = False
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health_check() -> HealthResponse:
     return HealthResponse(status="healthy", version=settings.app_version)
@@ -176,6 +186,34 @@ async def get_project_logs(project_id: str, limit: int = Query(default=50, ge=1,
     return _read_query_logs(project_id, limit=limit)
 
 
+@router.post("/projects/{project_id}/reindex")
+async def reindex_project(project_id: str) -> dict[str, Any]:
+    project = project_store.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        from app.services.ingestion import IngestionService
+
+        service = IngestionService()
+        return await service.rebuild_project_index(project_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/projects/{project_id}/documents/{filename}")
+async def delete_project_document(project_id: str, filename: str) -> dict[str, Any]:
+    try:
+        from app.services.ingestion import IngestionService
+
+        service = IngestionService()
+        return await service.delete_document(project_id, filename)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/projects/{project_id}/upload", response_model=UploadResponse)
 async def upload_document_to_project(project_id: str, file: UploadFile = File(...)) -> UploadResponse:
     allowed_types = [".pdf", ".txt"]
@@ -239,6 +277,82 @@ async def query_project_documents(project_id: str, request: QueryRequest) -> Que
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/eval")
+async def eval_project(project_id: str, request: EvalRequest) -> dict[str, Any]:
+    project = project_store.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not request.cases:
+        return {
+            "project_id": project_id,
+            "total_cases": 0,
+            "pass_rate": 0.0,
+            "avg_confidence": 0.0,
+            "results": [],
+        }
+
+    try:
+        from app.services.rag import RAGService
+
+        service = RAGService()
+        results: list[dict[str, Any]] = []
+        pass_count = 0
+        confidence_sum = 0.0
+
+        for case in request.cases:
+            answer, citations, confidence, abstained, diagnostics = await service.query(
+                case.question,
+                project_id,
+                include_diagnostics=request.include_diagnostics,
+            )
+            confidence_sum += confidence
+
+            answer_lower = answer.lower()
+            expected = [k.lower().strip() for k in case.expected_keywords if k.strip()]
+            keyword_hits = [k for k in expected if k in answer_lower]
+            case_pass = (len(keyword_hits) == len(expected)) and not abstained
+            if case_pass:
+                pass_count += 1
+
+            results.append(
+                {
+                    "question": case.question,
+                    "expected_keywords": case.expected_keywords,
+                    "keyword_hits": keyword_hits,
+                    "passed": case_pass,
+                    "confidence": confidence,
+                    "abstained": abstained,
+                    "citations_count": len(citations),
+                    "diagnostics": diagnostics if request.include_diagnostics else None,
+                }
+            )
+
+        total = len(request.cases)
+        pass_rate = round(pass_count / total, 4) if total else 0.0
+        avg_confidence = round(confidence_sum / total, 4) if total else 0.0
+
+        _append_query_log(
+            project_id,
+            {
+                "type": "eval_run",
+                "total_cases": total,
+                "pass_rate": pass_rate,
+                "avg_confidence": avg_confidence,
+            },
+        )
+
+        return {
+            "project_id": project_id,
+            "total_cases": total,
+            "pass_rate": pass_rate,
+            "avg_confidence": avg_confidence,
+            "results": results,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
