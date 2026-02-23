@@ -7,6 +7,7 @@ Loads values from environment variables or .env file.
 
 from functools import lru_cache
 from pathlib import Path
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,6 +29,8 @@ class Settings(BaseSettings):
     # API Settings
     api_host: str = "0.0.0.0"
     api_port: int = 8000
+    log_level: str = "INFO"
+    cors_origins: list[str] = ["http://localhost:3000", "http://localhost:8501"]
 
     # Streamlit Settings
     streamlit_port: int = 8501
@@ -55,6 +58,13 @@ class Settings(BaseSettings):
     chunk_size: int = 512
     chunk_overlap: int = 50
     max_file_size_mb: int = 10
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value):
+        if isinstance(value, str):
+            return [v.strip() for v in value.split(",") if v.strip()]
+        return value
 
     @property
     def chroma_path(self) -> Path:

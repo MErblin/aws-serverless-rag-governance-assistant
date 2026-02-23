@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from typing import Any
 import json
+import logging
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile, Query
 from pydantic import BaseModel, Field
@@ -20,6 +22,7 @@ router = APIRouter()
 settings = get_settings()
 project_store = ProjectStore()
 project_store.ensure_default_project()
+logger = logging.getLogger("docuchat.api.routes")
 
 
 def _logs_path(project_id: str):
@@ -46,6 +49,13 @@ def _read_query_logs(project_id: str, limit: int = 50) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             continue
     return out
+
+
+def _sanitize_filename(filename: str) -> str:
+    base = Path(filename).name.strip()
+    if not base or base in {".", ".."}:
+        raise ValueError("Invalid filename")
+    return base
 
 
 def _validate_upload(filename: str, size_bytes: int) -> str | None:
@@ -241,26 +251,34 @@ async def reindex_project(project_id: str) -> dict[str, Any]:
 
         service = IngestionService()
         return await service.rebuild_project_index(project_id)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("Failed to reindex project", extra={"project_id": project_id})
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.delete("/projects/{project_id}/documents/{filename}")
 async def delete_project_document(project_id: str, filename: str) -> dict[str, Any]:
     try:
+        safe_filename = _sanitize_filename(filename)
         from app.services.ingestion import IngestionService
 
         service = IngestionService()
-        return await service.delete_document(project_id, filename)
+        return await service.delete_document(project_id, safe_filename)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("Failed to delete document", extra={"project_id": project_id, "filename": safe_filename})
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/projects/{project_id}/upload", response_model=UploadResponse)
 async def upload_document_to_project(project_id: str, file: UploadFile = File(...)) -> UploadResponse:
-    filename = file.filename or "unknown"
+    raw_filename = file.filename or "unknown"
+    try:
+        filename = _sanitize_filename(raw_filename)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     contents = await file.read()
 
     validation_error = _validate_upload(filename, len(contents))
@@ -281,8 +299,9 @@ async def upload_document_to_project(project_id: str, file: UploadFile = File(..
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("Failed to upload document", extra={"project_id": project_id, "filename": filename})
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/projects/{project_id}/upload/batch", response_model=BatchUploadResponse)
@@ -300,7 +319,13 @@ async def batch_upload_documents(project_id: str, files: list[UploadFile] = File
     results: list[BatchUploadItem] = []
 
     for file in files:
-        filename = file.filename or "unknown"
+        raw_filename = file.filename or "unknown"
+        try:
+            filename = _sanitize_filename(raw_filename)
+        except ValueError as e:
+            results.append(BatchUploadItem(filename=raw_filename, success=False, error=str(e)))
+            continue
+
         contents = await file.read()
 
         validation_error = _validate_upload(filename, len(contents))
@@ -311,8 +336,9 @@ async def batch_upload_documents(project_id: str, files: list[UploadFile] = File
         try:
             document_id = await service.process_document(contents, filename, project_id)
             results.append(BatchUploadItem(filename=filename, success=True, document_id=document_id))
-        except Exception as e:
-            results.append(BatchUploadItem(filename=filename, success=False, error=str(e)))
+        except Exception:
+            logger.exception("Failed batch upload item", extra={"project_id": project_id, "filename": filename})
+            results.append(BatchUploadItem(filename=filename, success=False, error="Internal server error"))
 
     succeeded = sum(1 for r in results if r.success)
     failed = len(results) - succeeded
@@ -368,8 +394,9 @@ async def query_project_documents(project_id: str, request: QueryRequest) -> Que
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("Failed project query", extra={"project_id": project_id})
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/projects/{project_id}/eval")
@@ -444,8 +471,9 @@ async def eval_project(project_id: str, request: EvalRequest) -> dict[str, Any]:
             "avg_confidence": avg_confidence,
             "results": results,
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("Failed eval run", extra={"project_id": project_id})
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # Backward-compatible endpoints mapped to default project

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import shutil
+import logging
 
 import fitz  # PyMuPDF
 from llama_index.core import Document, StorageContext, VectorStoreIndex, load_index_from_storage
@@ -18,6 +19,7 @@ from app.config import get_settings
 from app.services.projects import ProjectStore
 
 settings = get_settings()
+logger = logging.getLogger("docuchat.api.ingestion")
 
 
 class IngestionService:
@@ -37,12 +39,13 @@ class IngestionService:
                 storage_context = StorageContext.from_defaults(persist_dir=str(index_dir))
                 return load_index_from_storage(storage_context)
             return VectorStoreIndex([])
-        except Exception as e:
-            print(f"Error loading index: {e}, creating new one.")
+        except Exception:
+            logger.exception("Error loading index, creating new one")
             return VectorStoreIndex([])
 
     async def process_document(self, file_content: bytes, filename: str, project_id: str) -> str:
         """Process and index a document into a specific project."""
+        filename = Path(filename).name
         project = self.project_store.get_project(project_id)
         if not project:
             raise ValueError(f"Project not found: {project_id}")
@@ -75,6 +78,7 @@ class IngestionService:
 
         # Keep original file for auditing/demo traceability
         (documents_dir / filename).write_bytes(file_content)
+        logger.info("Document indexed", extra={"project_id": project_id, "filename": filename})
 
         return doc.doc_id
 

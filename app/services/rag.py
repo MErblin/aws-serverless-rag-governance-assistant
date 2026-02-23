@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import re
+import logging
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from app.config import get_settings
 from app.services.projects import ProjectStore
 
 settings = get_settings()
+logger = logging.getLogger("docuchat.api.rag")
 
 
 class RAGService:
@@ -45,8 +47,8 @@ class RAGService:
                 storage_context = StorageContext.from_defaults(persist_dir=str(index_dir))
                 return load_index_from_storage(storage_context)
             return VectorStoreIndex([])
-        except Exception as e:
-            print(f"Error loading index in RAG Service: {e}")
+        except Exception:
+            logger.exception("Error loading project index")
             return VectorStoreIndex([])
 
     def _tokenize(self, text: str) -> list[str]:
