@@ -48,6 +48,16 @@ def _read_query_logs(project_id: str, limit: int = 50) -> list[dict[str, Any]]:
     return out
 
 
+def _validate_upload(filename: str, size_bytes: int) -> str | None:
+    allowed_types = {".pdf", ".txt"}
+    file_ext = "." + filename.split(".")[-1].lower() if "." in filename else ""
+    if file_ext not in allowed_types:
+        return f"Unsupported file type. Allowed: {', '.join(sorted(allowed_types))}"
+    if size_bytes > settings.max_file_size_bytes:
+        return f"File too large. Maximum size: {settings.max_file_size_mb}MB"
+    return None
+
+
 class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=1000)
     include_diagnostics: bool = False
@@ -93,6 +103,21 @@ class UploadResponse(BaseModel):
     document_id: str
     filename: str
     project_id: str
+
+
+class BatchUploadItem(BaseModel):
+    filename: str
+    success: bool
+    document_id: str | None = None
+    error: str | None = None
+
+
+class BatchUploadResponse(BaseModel):
+    project_id: str
+    total_files: int
+    succeeded: int
+    failed: int
+    results: list[BatchUploadItem]
 
 
 class HealthResponse(BaseModel):
@@ -186,6 +211,25 @@ async def get_project_logs(project_id: str, limit: int = Query(default=50, ge=1,
     return _read_query_logs(project_id, limit=limit)
 
 
+@router.get("/projects/{project_id}/ingestion/status")
+async def get_ingestion_status(project_id: str) -> dict[str, Any]:
+    project = project_store.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    docs = await list_project_documents(project_id)
+    logs = _read_query_logs(project_id, limit=200)
+    batch_logs = [l for l in logs if l.get("type") == "batch_upload"]
+    last_batch = batch_logs[-1] if batch_logs else None
+
+    return {
+        "project_id": project_id,
+        "documents_count": len(docs),
+        "last_batch_upload": last_batch,
+        "recent_batch_uploads": batch_logs[-5:],
+    }
+
+
 @router.post("/projects/{project_id}/reindex")
 async def reindex_project(project_id: str) -> dict[str, Any]:
     project = project_store.get_project(project_id)
@@ -216,16 +260,12 @@ async def delete_project_document(project_id: str, filename: str) -> dict[str, A
 
 @router.post("/projects/{project_id}/upload", response_model=UploadResponse)
 async def upload_document_to_project(project_id: str, file: UploadFile = File(...)) -> UploadResponse:
-    allowed_types = [".pdf", ".txt"]
     filename = file.filename or "unknown"
-    file_ext = "." + filename.split(".")[-1].lower() if "." in filename else ""
-
-    if file_ext not in allowed_types:
-        raise HTTPException(status_code=400, detail=f"Unsupported file type. Allowed: {', '.join(allowed_types)}")
-
     contents = await file.read()
-    if len(contents) > settings.max_file_size_bytes:
-        raise HTTPException(status_code=400, detail=f"File too large. Maximum size: {settings.max_file_size_mb}MB")
+
+    validation_error = _validate_upload(filename, len(contents))
+    if validation_error:
+        raise HTTPException(status_code=400, detail=validation_error)
 
     try:
         from app.services.ingestion import IngestionService
@@ -243,6 +283,57 @@ async def upload_document_to_project(project_id: str, file: UploadFile = File(..
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/upload/batch", response_model=BatchUploadResponse)
+async def batch_upload_documents(project_id: str, files: list[UploadFile] = File(...)) -> BatchUploadResponse:
+    project = project_store.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+
+    from app.services.ingestion import IngestionService
+
+    service = IngestionService()
+    results: list[BatchUploadItem] = []
+
+    for file in files:
+        filename = file.filename or "unknown"
+        contents = await file.read()
+
+        validation_error = _validate_upload(filename, len(contents))
+        if validation_error:
+            results.append(BatchUploadItem(filename=filename, success=False, error=validation_error))
+            continue
+
+        try:
+            document_id = await service.process_document(contents, filename, project_id)
+            results.append(BatchUploadItem(filename=filename, success=True, document_id=document_id))
+        except Exception as e:
+            results.append(BatchUploadItem(filename=filename, success=False, error=str(e)))
+
+    succeeded = sum(1 for r in results if r.success)
+    failed = len(results) - succeeded
+
+    _append_query_log(
+        project_id,
+        {
+            "type": "batch_upload",
+            "total_files": len(results),
+            "succeeded": succeeded,
+            "failed": failed,
+        },
+    )
+
+    return BatchUploadResponse(
+        project_id=project_id,
+        total_files=len(results),
+        succeeded=succeeded,
+        failed=failed,
+        results=results,
+    )
 
 
 @router.post("/projects/{project_id}/query", response_model=QueryResponse)
