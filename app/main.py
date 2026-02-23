@@ -6,6 +6,7 @@ Entry point for the FastAPI backend server.
 
 from contextlib import asynccontextmanager
 import logging
+from uuid import uuid4
 from typing import AsyncGenerator
 
 from fastapi import FastAPI, Request
@@ -50,7 +51,11 @@ app.add_middleware(
 
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid4())
+    request.state.request_id = request_id
+
     response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
@@ -60,8 +65,12 @@ async def add_security_headers(request: Request, call_next):
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
-    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
-    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+    request_id = getattr(request.state, "request_id", None)
+    logger.exception("Unhandled error on %s %s request_id=%s", request.method, request.url.path, request_id)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error", "request_id": request_id},
+    )
 
 
 app.include_router(router, prefix="/api")

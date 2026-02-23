@@ -38,7 +38,8 @@ Success target:
 1. Multimodal ingestion (OCR/layout/table-aware)
 2. Async ingestion queue + background workers
 3. Managed DB + auth hardening + deployment scaling
-4. Kubernetes only when uptime/load justify cost
+4. API key auth middleware (header-based) once deployment model is finalized
+5. Kubernetes only when uptime/load justify cost
 
 ## Immediate execution order (starting now)
 1) Implement BM25 + dense fusion in backend retrieval

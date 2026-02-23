@@ -12,7 +12,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, Query
+from fastapi import APIRouter, File, HTTPException, UploadFile, Query, Request
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -27,6 +27,10 @@ logger = logging.getLogger("docuchat.api.routes")
 
 def _logs_path(project_id: str):
     return project_store.get_project_paths(project_id)["project_dir"] / "query_logs.jsonl"
+
+
+def _audit_path(project_id: str):
+    return project_store.get_project_paths(project_id)["project_dir"] / "audit_logs.jsonl"
 
 
 def _append_query_log(project_id: str, payload: dict[str, Any]) -> None:
@@ -49,6 +53,28 @@ def _read_query_logs(project_id: str, limit: int = 50) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             continue
     return out
+
+
+def _append_audit_log(
+    project_id: str,
+    request: Request,
+    action: str,
+    status: str,
+    details: dict[str, Any] | None = None,
+) -> None:
+    path = _audit_path(project_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "request_id": getattr(request.state, "request_id", None),
+        "method": request.method,
+        "path": request.url.path,
+        "action": action,
+        "status": status,
+        "details": details or {},
+    }
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(payload) + "\n")
 
 
 def _sanitize_filename(filename: str) -> str:
@@ -151,7 +177,7 @@ async def health_check() -> HealthResponse:
 
 
 @router.post("/projects")
-async def create_project(request: ProjectCreateRequest) -> dict[str, Any]:
+async def create_project(request: ProjectCreateRequest, http_request: Request) -> dict[str, Any]:
     try:
         project = project_store.create_project(
             name=request.name,
@@ -162,6 +188,7 @@ async def create_project(request: ProjectCreateRequest) -> dict[str, Any]:
             chunk_size=request.chunk_size,
             chunk_overlap=request.chunk_overlap,
         )
+        _append_audit_log(project["id"], http_request, "project.create", "success", {"name": project["name"]})
         return project
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -181,9 +208,11 @@ async def get_project(project_id: str) -> dict[str, Any]:
 
 
 @router.patch("/projects/{project_id}")
-async def update_project(project_id: str, request: ProjectUpdateRequest) -> dict[str, Any]:
+async def update_project(project_id: str, request: ProjectUpdateRequest, http_request: Request) -> dict[str, Any]:
     try:
-        project = project_store.update_project(project_id, request.model_dump(exclude_none=True))
+        patch = request.model_dump(exclude_none=True)
+        project = project_store.update_project(project_id, patch)
+        _append_audit_log(project_id, http_request, "project.update", "success", {"fields": list(patch.keys())})
         return project
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -221,6 +250,25 @@ async def get_project_logs(project_id: str, limit: int = Query(default=50, ge=1,
     return _read_query_logs(project_id, limit=limit)
 
 
+@router.get("/projects/{project_id}/audit")
+async def get_project_audit_logs(project_id: str, limit: int = Query(default=50, ge=1, le=500)) -> list[dict[str, Any]]:
+    project = project_store.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    path = _audit_path(project_id)
+    if not path.exists():
+        return []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    out: list[dict[str, Any]] = []
+    for line in lines[-max(1, min(limit, 500)) :]:
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
 @router.get("/projects/{project_id}/ingestion/status")
 async def get_ingestion_status(project_id: str) -> dict[str, Any]:
     project = project_store.get_project(project_id)
@@ -241,7 +289,7 @@ async def get_ingestion_status(project_id: str) -> dict[str, Any]:
 
 
 @router.post("/projects/{project_id}/reindex")
-async def reindex_project(project_id: str) -> dict[str, Any]:
+async def reindex_project(project_id: str, http_request: Request) -> dict[str, Any]:
     project = project_store.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -250,29 +298,35 @@ async def reindex_project(project_id: str) -> dict[str, Any]:
         from app.services.ingestion import IngestionService
 
         service = IngestionService()
-        return await service.rebuild_project_index(project_id)
+        result = await service.rebuild_project_index(project_id)
+        _append_audit_log(project_id, http_request, "project.reindex", "success", result)
+        return result
     except Exception:
         logger.exception("Failed to reindex project", extra={"project_id": project_id})
+        _append_audit_log(project_id, http_request, "project.reindex", "error")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.delete("/projects/{project_id}/documents/{filename}")
-async def delete_project_document(project_id: str, filename: str) -> dict[str, Any]:
+async def delete_project_document(project_id: str, filename: str, http_request: Request) -> dict[str, Any]:
     try:
         safe_filename = _sanitize_filename(filename)
         from app.services.ingestion import IngestionService
 
         service = IngestionService()
-        return await service.delete_document(project_id, safe_filename)
+        result = await service.delete_document(project_id, safe_filename)
+        _append_audit_log(project_id, http_request, "document.delete", "success", {"filename": safe_filename})
+        return result
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception:
         logger.exception("Failed to delete document", extra={"project_id": project_id, "filename": safe_filename})
+        _append_audit_log(project_id, http_request, "document.delete", "error", {"filename": safe_filename})
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/projects/{project_id}/upload", response_model=UploadResponse)
-async def upload_document_to_project(project_id: str, file: UploadFile = File(...)) -> UploadResponse:
+async def upload_document_to_project(project_id: str, file: UploadFile = File(...), http_request: Request = None) -> UploadResponse:
     raw_filename = file.filename or "unknown"
     try:
         filename = _sanitize_filename(raw_filename)
@@ -291,6 +345,8 @@ async def upload_document_to_project(project_id: str, file: UploadFile = File(..
         service = IngestionService()
         document_id = await service.process_document(contents, filename, project_id)
 
+        if http_request:
+            _append_audit_log(project_id, http_request, "document.upload", "success", {"filename": filename})
         return UploadResponse(
             message="Document uploaded and indexed successfully",
             document_id=document_id,
@@ -301,11 +357,13 @@ async def upload_document_to_project(project_id: str, file: UploadFile = File(..
         raise HTTPException(status_code=404, detail=str(e))
     except Exception:
         logger.exception("Failed to upload document", extra={"project_id": project_id, "filename": filename})
+        if http_request:
+            _append_audit_log(project_id, http_request, "document.upload", "error", {"filename": filename})
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/projects/{project_id}/upload/batch", response_model=BatchUploadResponse)
-async def batch_upload_documents(project_id: str, files: list[UploadFile] = File(...)) -> BatchUploadResponse:
+async def batch_upload_documents(project_id: str, files: list[UploadFile] = File(...), http_request: Request = None) -> BatchUploadResponse:
     project = project_store.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -350,8 +408,17 @@ async def batch_upload_documents(project_id: str, files: list[UploadFile] = File
             "total_files": len(results),
             "succeeded": succeeded,
             "failed": failed,
+            "request_id": getattr(http_request.state, "request_id", None) if http_request else None,
         },
     )
+    if http_request:
+        _append_audit_log(
+            project_id,
+            http_request,
+            "document.batch_upload",
+            "success" if failed == 0 else "partial",
+            {"total_files": len(results), "succeeded": succeeded, "failed": failed},
+        )
 
     return BatchUploadResponse(
         project_id=project_id,
@@ -363,7 +430,7 @@ async def batch_upload_documents(project_id: str, files: list[UploadFile] = File
 
 
 @router.post("/projects/{project_id}/query", response_model=QueryResponse)
-async def query_project_documents(project_id: str, request: QueryRequest) -> QueryResponse:
+async def query_project_documents(project_id: str, request: QueryRequest, http_request: Request) -> QueryResponse:
     try:
         from app.services.rag import RAGService
 
@@ -381,7 +448,15 @@ async def query_project_documents(project_id: str, request: QueryRequest) -> Que
                 "abstained": abstained,
                 "citations_count": len(citations),
                 "diagnostics": diagnostics,
+                "request_id": getattr(http_request.state, "request_id", None),
             },
+        )
+        _append_audit_log(
+            project_id,
+            http_request,
+            "query.run",
+            "success",
+            {"confidence": confidence, "abstained": abstained, "citations_count": len(citations)},
         )
 
         return QueryResponse(
@@ -396,11 +471,12 @@ async def query_project_documents(project_id: str, request: QueryRequest) -> Que
         raise HTTPException(status_code=404, detail=str(e))
     except Exception:
         logger.exception("Failed project query", extra={"project_id": project_id})
+        _append_audit_log(project_id, http_request, "query.run", "error")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/projects/{project_id}/eval")
-async def eval_project(project_id: str, request: EvalRequest) -> dict[str, Any]:
+async def eval_project(project_id: str, request: EvalRequest, http_request: Request) -> dict[str, Any]:
     project = project_store.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -461,7 +537,15 @@ async def eval_project(project_id: str, request: EvalRequest) -> dict[str, Any]:
                 "total_cases": total,
                 "pass_rate": pass_rate,
                 "avg_confidence": avg_confidence,
+                "request_id": getattr(http_request.state, "request_id", None),
             },
+        )
+        _append_audit_log(
+            project_id,
+            http_request,
+            "eval.run",
+            "success",
+            {"total_cases": total, "pass_rate": pass_rate, "avg_confidence": avg_confidence},
         )
 
         return {
@@ -473,15 +557,16 @@ async def eval_project(project_id: str, request: EvalRequest) -> dict[str, Any]:
         }
     except Exception:
         logger.exception("Failed eval run", extra={"project_id": project_id})
+        _append_audit_log(project_id, http_request, "eval.run", "error")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # Backward-compatible endpoints mapped to default project
 @router.post("/upload", response_model=UploadResponse)
-async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
-    return await upload_document_to_project(settings.default_project_id, file)
+async def upload_document(file: UploadFile = File(...), http_request: Request = None) -> UploadResponse:
+    return await upload_document_to_project(settings.default_project_id, file, http_request)
 
 
 @router.post("/query", response_model=QueryResponse)
-async def query_documents(request: QueryRequest) -> QueryResponse:
-    return await query_project_documents(settings.default_project_id, request)
+async def query_documents(request: QueryRequest, http_request: Request) -> QueryResponse:
+    return await query_project_documents(settings.default_project_id, request, http_request)
