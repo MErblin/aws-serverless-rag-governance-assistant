@@ -7,8 +7,10 @@ REST API endpoints for project-based document upload and querying.
 from __future__ import annotations
 
 from typing import Any
+import json
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, UploadFile, Query
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -18,6 +20,32 @@ router = APIRouter()
 settings = get_settings()
 project_store = ProjectStore()
 project_store.ensure_default_project()
+
+
+def _logs_path(project_id: str):
+    return project_store.get_project_paths(project_id)["project_dir"] / "query_logs.jsonl"
+
+
+def _append_query_log(project_id: str, payload: dict[str, Any]) -> None:
+    path = _logs_path(project_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload["timestamp"] = datetime.now(timezone.utc).isoformat()
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(payload) + "\n")
+
+
+def _read_query_logs(project_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    path = _logs_path(project_id)
+    if not path.exists():
+        return []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    out: list[dict[str, Any]] = []
+    for line in lines[-max(1, min(limit, 500)) :]:
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
 
 
 class QueryRequest(BaseModel):
@@ -116,6 +144,38 @@ async def update_project(project_id: str, request: ProjectUpdateRequest) -> dict
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@router.get("/projects/{project_id}/documents")
+async def list_project_documents(project_id: str) -> list[dict[str, Any]]:
+    project = project_store.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    docs_dir = project_store.get_project_paths(project_id)["documents_dir"]
+    docs_dir.mkdir(parents=True, exist_ok=True)
+
+    output: list[dict[str, Any]] = []
+    for p in docs_dir.iterdir():
+        if p.is_file():
+            stat = p.stat()
+            output.append(
+                {
+                    "filename": p.name,
+                    "size_bytes": stat.st_size,
+                    "updated_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                }
+            )
+    output.sort(key=lambda d: d["updated_at"], reverse=True)
+    return output
+
+
+@router.get("/projects/{project_id}/logs")
+async def get_project_logs(project_id: str, limit: int = Query(default=50, ge=1, le=500)) -> list[dict[str, Any]]:
+    project = project_store.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return _read_query_logs(project_id, limit=limit)
+
+
 @router.post("/projects/{project_id}/upload", response_model=UploadResponse)
 async def upload_document_to_project(project_id: str, file: UploadFile = File(...)) -> UploadResponse:
     allowed_types = [".pdf", ".txt"]
@@ -158,6 +218,17 @@ async def query_project_documents(project_id: str, request: QueryRequest) -> Que
             project_id,
             include_diagnostics=request.include_diagnostics,
         )
+        _append_query_log(
+            project_id,
+            {
+                "question": request.question,
+                "confidence": confidence,
+                "abstained": abstained,
+                "citations_count": len(citations),
+                "diagnostics": diagnostics,
+            },
+        )
+
         return QueryResponse(
             answer=answer,
             citations=[Citation(**c) for c in citations],
