@@ -11,7 +11,9 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 
+import fitz
 from fastapi import APIRouter, File, HTTPException, UploadFile, Query, Request
 from pydantic import BaseModel, Field
 
@@ -75,6 +77,39 @@ def _append_audit_log(
     }
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(payload) + "\n")
+
+
+def _eval_profiles_dir(project_id: str) -> Path:
+    p = project_store.get_project_paths(project_id)["project_dir"] / "eval_profiles"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _save_eval_profile(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    profile_id = re.sub(r"[^a-zA-Z0-9_-]", "-", payload["profile_id"].strip())
+    if not profile_id:
+        raise ValueError("Invalid profile_id")
+    payload["profile_id"] = profile_id
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+    path = _eval_profiles_dir(project_id) / f"{profile_id}.json"
+    if not path.exists():
+        payload["created_at"] = payload["updated_at"]
+    else:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        payload["created_at"] = existing.get("created_at", payload["updated_at"])
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload
+
+
+def _list_eval_profiles(project_id: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for p in _eval_profiles_dir(project_id).glob("*.json"):
+        try:
+            out.append(json.loads(p.read_text(encoding="utf-8")))
+        except Exception:
+            continue
+    out.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+    return out
 
 
 def _sanitize_filename(filename: str) -> str:
@@ -169,6 +204,21 @@ class EvalCase(BaseModel):
 class EvalRequest(BaseModel):
     cases: list[EvalCase] = Field(default_factory=list)
     include_diagnostics: bool = False
+
+
+class EvalProfileRequest(BaseModel):
+    profile_id: str = Field(..., min_length=2, max_length=64)
+    name: str = Field(..., min_length=2, max_length=120)
+    chatbot_type: str = Field(default="general", max_length=40)
+    min_pass_rate: float = Field(default=0.7, ge=0.0, le=1.0)
+    min_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    require_citations: bool = True
+    strict_abstain: bool = False
+
+
+class EvalBootstrapRequest(BaseModel):
+    profile_id: str | None = None
+    max_cases: int = Field(default=30, ge=5, le=100)
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -473,6 +523,82 @@ async def query_project_documents(project_id: str, request: QueryRequest, http_r
         logger.exception("Failed project query", extra={"project_id": project_id})
         _append_audit_log(project_id, http_request, "query.run", "error")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/projects/{project_id}/eval/profiles")
+async def upsert_eval_profile(project_id: str, request: EvalProfileRequest, http_request: Request) -> dict[str, Any]:
+    project = project_store.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        payload = request.model_dump()
+        saved = _save_eval_profile(project_id, payload)
+        _append_audit_log(project_id, http_request, "eval.profile.upsert", "success", {"profile_id": saved["profile_id"]})
+        return saved
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/projects/{project_id}/eval/profiles")
+async def list_eval_profiles(project_id: str) -> list[dict[str, Any]]:
+    project = project_store.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return _list_eval_profiles(project_id)
+
+
+@router.post("/projects/{project_id}/eval/bootstrap")
+async def bootstrap_eval_dataset(project_id: str, request: EvalBootstrapRequest, http_request: Request) -> dict[str, Any]:
+    project = project_store.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    docs_dir = project_store.get_project_paths(project_id)["documents_dir"]
+    docs_dir.mkdir(parents=True, exist_ok=True)
+
+    cases: list[dict[str, Any]] = []
+    for p in sorted(docs_dir.iterdir()):
+        if not p.is_file():
+            continue
+        # universal basic cases
+        cases.append({"question": f"What are the key points in {p.name}?", "expected_keywords": []})
+        cases.append({"question": f"Summarize {p.name} in plain language.", "expected_keywords": []})
+
+        # lightweight keyword extraction from text/PDF snippet
+        try:
+            snippet = ""
+            if p.suffix.lower() == ".txt":
+                snippet = p.read_text(encoding="utf-8", errors="ignore")[:2500]
+            elif p.suffix.lower() == ".pdf":
+                with fitz.open(p) as pdf:
+                    if len(pdf) > 0:
+                        snippet = pdf[0].get_text()[:2500]
+
+            words = [w.lower() for w in re.findall(r"[a-zA-Z]{5,}", snippet)]
+            freq: dict[str, int] = {}
+            for w in words:
+                freq[w] = freq.get(w, 0) + 1
+            top = [k for k, _ in sorted(freq.items(), key=lambda kv: kv[1], reverse=True)[:3]]
+            if top:
+                cases.append({"question": f"What does {p.name} say about {top[0]}?", "expected_keywords": top[:2]})
+        except Exception:
+            continue
+
+    # add out-of-scope safety checks
+    cases.append({"question": "What is the office Wi-Fi password?", "expected_keywords": []})
+    cases.append({"question": "Tell me information not present in these documents.", "expected_keywords": []})
+
+    max_cases = min(request.max_cases, len(cases))
+    cases = cases[:max_cases]
+
+    _append_audit_log(project_id, http_request, "eval.bootstrap", "success", {"cases": len(cases)})
+    return {
+        "project_id": project_id,
+        "profile_id": request.profile_id,
+        "cases_generated": len(cases),
+        "cases": cases,
+    }
 
 
 @router.post("/projects/{project_id}/eval")
