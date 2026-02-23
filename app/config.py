@@ -39,9 +39,17 @@ class Settings(BaseSettings):
     # Embedding Model
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
 
-    # ChromaDB Settings
+    # Storage settings
     chroma_persist_dir: str = "./data/chroma"
     chroma_collection_name: str = "documents"
+    projects_root_dir: str = "./data/projects"
+    default_project_id: str = "default"
+
+    # Prompt defaults
+    default_system_prompt: str = (
+        "You are a helpful assistant. Answer using only provided context. "
+        "If context is insufficient, clearly say you don't know."
+    )
 
     # Document Processing
     chunk_size: int = 512
@@ -52,6 +60,11 @@ class Settings(BaseSettings):
     def chroma_path(self) -> Path:
         """Get ChromaDB persistence path as Path object."""
         return Path(self.chroma_persist_dir)
+
+    @property
+    def projects_root_path(self) -> Path:
+        """Root path for per-project storage."""
+        return Path(self.projects_root_dir)
 
     @property
     def max_file_size_bytes(self) -> int:
