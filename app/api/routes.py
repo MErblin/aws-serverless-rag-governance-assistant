@@ -22,6 +22,7 @@ project_store.ensure_default_project()
 
 class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=1000)
+    include_diagnostics: bool = False
 
 
 class ProjectCreateRequest(BaseModel):
@@ -56,6 +57,7 @@ class QueryResponse(BaseModel):
     confidence: float = 0.0
     abstained: bool = False
     project_id: str
+    diagnostics: dict[str, Any] | None = None
 
 
 class UploadResponse(BaseModel):
@@ -151,13 +153,18 @@ async def query_project_documents(project_id: str, request: QueryRequest) -> Que
         from app.services.rag import RAGService
 
         service = RAGService()
-        answer, citations, confidence, abstained = await service.query(request.question, project_id)
+        answer, citations, confidence, abstained, diagnostics = await service.query(
+            request.question,
+            project_id,
+            include_diagnostics=request.include_diagnostics,
+        )
         return QueryResponse(
             answer=answer,
             citations=[Citation(**c) for c in citations],
             confidence=confidence,
             abstained=abstained,
             project_id=project_id,
+            diagnostics=diagnostics,
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
