@@ -13,6 +13,8 @@ Build **one reusable RAG backend platform** that powers many app experiences by 
 
 Result: one platform, many chatbots.
 
+Business framing: each department gets an isolated assistant with its own documents, index, behavior, and audit trail.
+
 ---
 
 ## 2) Core product requirements

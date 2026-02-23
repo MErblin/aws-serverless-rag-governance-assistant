@@ -194,6 +194,11 @@ docuchat-rag/
 - 🔐 User authentication
 - ☁️ Cloud deployment
 
+## 🧾 Business Explainer
+
+For non-technical stakeholder messaging, see:
+- `docs/BUSINESS_EXPLANATION_PLAYBOOK.md`
+
 ## 🤝 Contributing
 
 1. Fork the repository
