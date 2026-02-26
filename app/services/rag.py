@@ -261,10 +261,11 @@ class RAGService:
         if abstained:
             answer = "I don't have enough grounded context in this project's documents to answer confidently."
         else:
+            joined_context = "\n\n".join(context_blocks)
             prompt = (
                 f"{system_prompt}\n\n"
                 "Use only the provided context. If uncertain, say you don't know.\n\n"
-                f"Context:\n{'\n\n'.join(context_blocks)}\n\n"
+                f"Context:\n{joined_context}\n\n"
                 f"Question: {question}\n"
                 "Answer:"
             )
