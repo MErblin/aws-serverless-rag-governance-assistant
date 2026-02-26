@@ -1,13 +1,10 @@
 """
-Integration-style test for ingestion + query contract (mocked LLM call path).
+Integration-style contract test for ingestion + query path using mocks.
 """
 
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
-from app.services.ingestion import IngestionService
-from app.services.rag import RAGService
 
 
 @pytest.mark.asyncio
@@ -15,11 +12,15 @@ async def test_rag_pipeline_contract():
     filename = "test_doc.txt"
     content = b"The secret code for the project is BLUE-OMEGA-99."
 
-    ingestion = IngestionService()
-    doc_id = await ingestion.process_document(content, filename, "default")
-    assert doc_id is not None
+    with patch("app.services.ingestion.IngestionService.__init__", return_value=None), patch(
+        "app.services.ingestion.IngestionService.process_document", new=AsyncMock(return_value="doc-1")
+    ):
+        from app.services.ingestion import IngestionService
 
-    rag = RAGService()
+        ingestion = IngestionService()
+        doc_id = await ingestion.process_document(content, filename, "default")
+
+    assert doc_id == "doc-1"
 
     mock_return = (
         "The secret code is BLUE-OMEGA-99.",
@@ -29,7 +30,12 @@ async def test_rag_pipeline_contract():
         {"retrieval_mode": "hybrid_rrf_rerank"},
     )
 
-    with patch.object(RAGService, "query", new=AsyncMock(return_value=mock_return)):
+    with patch("app.services.rag.RAGService.__init__", return_value=None), patch(
+        "app.services.rag.RAGService.query", new=AsyncMock(return_value=mock_return)
+    ):
+        from app.services.rag import RAGService
+
+        rag = RAGService()
         answer, citations, confidence, abstained, diagnostics = await rag.query("What is the secret code?", "default")
 
     assert "BLUE-OMEGA-99" in answer

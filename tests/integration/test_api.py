@@ -40,7 +40,9 @@ class TestRootEndpoint:
 
 class TestUploadEndpoint:
     def test_upload_valid_txt_file(self, client):
-        with patch("app.services.ingestion.IngestionService.process_document", new=AsyncMock(return_value="doc-123")):
+        with patch("app.services.ingestion.IngestionService.__init__", return_value=None), patch(
+            "app.services.ingestion.IngestionService.process_document", new=AsyncMock(return_value="doc-123")
+        ):
             files = {"file": ("test.txt", b"Hello, world!", "text/plain")}
             response = client.post("/api/upload", files=files)
 
@@ -70,7 +72,9 @@ class TestQueryEndpoint:
             False,
             {"retrieval_mode": "hybrid_rrf_rerank"},
         )
-        with patch("app.services.rag.RAGService.query", new=AsyncMock(return_value=mock_result)):
+        with patch("app.services.rag.RAGService.__init__", return_value=None), patch(
+            "app.services.rag.RAGService.query", new=AsyncMock(return_value=mock_result)
+        ):
             response = client.post(
                 "/api/query",
                 json={"question": "What is this document about?", "include_diagnostics": True},
