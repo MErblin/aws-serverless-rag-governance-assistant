@@ -112,6 +112,65 @@ def _list_eval_profiles(project_id: str) -> list[dict[str, Any]]:
     return out
 
 
+def _get_eval_profile(project_id: str, profile_id: str) -> dict[str, Any] | None:
+    path = _eval_profiles_dir(project_id) / f"{profile_id}.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _eval_datasets_dir(project_id: str) -> Path:
+    p = project_store.get_project_paths(project_id)["project_dir"] / "eval_datasets"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _save_eval_dataset(project_id: str, dataset_id: str, cases: list[dict[str, Any]], profile_id: str | None = None) -> dict[str, Any]:
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "-", dataset_id.strip())
+    if not safe_id:
+        raise ValueError("Invalid dataset_id")
+    payload = {
+        "dataset_id": safe_id,
+        "project_id": project_id,
+        "profile_id": profile_id,
+        "cases": cases,
+        "count": len(cases),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    path = _eval_datasets_dir(project_id) / f"{safe_id}.json"
+    if path.exists():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        payload["created_at"] = existing.get("created_at", payload["updated_at"])
+    else:
+        payload["created_at"] = payload["updated_at"]
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload
+
+
+def _get_eval_dataset(project_id: str, dataset_id: str) -> dict[str, Any] | None:
+    path = _eval_datasets_dir(project_id) / f"{dataset_id}.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _list_eval_datasets(project_id: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for p in _eval_datasets_dir(project_id).glob("*.json"):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            out.append({
+                "dataset_id": data.get("dataset_id"),
+                "count": data.get("count", 0),
+                "profile_id": data.get("profile_id"),
+                "updated_at": data.get("updated_at"),
+            })
+        except Exception:
+            continue
+    out.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+    return out
+
+
 def _sanitize_filename(filename: str) -> str:
     base = Path(filename).name.strip()
     if not base or base in {".", ".."}:
@@ -204,6 +263,8 @@ class EvalCase(BaseModel):
 class EvalRequest(BaseModel):
     cases: list[EvalCase] = Field(default_factory=list)
     include_diagnostics: bool = False
+    profile_id: str | None = None
+    dataset_id: str | None = None
 
 
 class EvalProfileRequest(BaseModel):
@@ -548,6 +609,25 @@ async def list_eval_profiles(project_id: str) -> list[dict[str, Any]]:
     return _list_eval_profiles(project_id)
 
 
+@router.get("/projects/{project_id}/eval/datasets")
+async def list_eval_datasets(project_id: str) -> list[dict[str, Any]]:
+    project = project_store.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return _list_eval_datasets(project_id)
+
+
+@router.get("/projects/{project_id}/eval/datasets/{dataset_id}")
+async def get_eval_dataset(project_id: str, dataset_id: str) -> dict[str, Any]:
+    project = project_store.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    dataset = _get_eval_dataset(project_id, dataset_id)
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    return dataset
+
+
 @router.post("/projects/{project_id}/eval/bootstrap")
 async def bootstrap_eval_dataset(project_id: str, request: EvalBootstrapRequest, http_request: Request) -> dict[str, Any]:
     project = project_store.get_project(project_id)
@@ -592,12 +672,17 @@ async def bootstrap_eval_dataset(project_id: str, request: EvalBootstrapRequest,
     max_cases = min(request.max_cases, len(cases))
     cases = cases[:max_cases]
 
-    _append_audit_log(project_id, http_request, "eval.bootstrap", "success", {"cases": len(cases)})
+    dataset_id = f"bootstrap-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+    saved = _save_eval_dataset(project_id, dataset_id, cases, profile_id=request.profile_id)
+
+    _append_audit_log(project_id, http_request, "eval.bootstrap", "success", {"cases": len(cases), "dataset_id": dataset_id})
     return {
         "project_id": project_id,
         "profile_id": request.profile_id,
+        "dataset_id": dataset_id,
         "cases_generated": len(cases),
         "cases": cases,
+        "saved": {"dataset_id": saved["dataset_id"], "count": saved["count"]},
     }
 
 
@@ -607,12 +692,26 @@ async def eval_project(project_id: str, request: EvalRequest, http_request: Requ
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    if not request.cases:
+    profile = _get_eval_profile(project_id, request.profile_id) if request.profile_id else None
+    if request.profile_id and not profile:
+        raise HTTPException(status_code=404, detail="Eval profile not found")
+
+    run_cases = list(request.cases)
+    if request.dataset_id:
+        dataset = _get_eval_dataset(project_id, request.dataset_id)
+        if not dataset:
+            raise HTTPException(status_code=404, detail="Eval dataset not found")
+        run_cases = [EvalCase(**c) for c in dataset.get("cases", [])]
+
+    if not run_cases:
         return {
             "project_id": project_id,
+            "profile_id": request.profile_id,
+            "dataset_id": request.dataset_id,
             "total_cases": 0,
             "pass_rate": 0.0,
             "avg_confidence": 0.0,
+            "meets_profile_thresholds": None,
             "results": [],
         }
 
@@ -624,7 +723,7 @@ async def eval_project(project_id: str, request: EvalRequest, http_request: Requ
         pass_count = 0
         confidence_sum = 0.0
 
-        for case in request.cases:
+        for case in run_cases:
             answer, citations, confidence, abstained, diagnostics = await service.query(
                 case.question,
                 project_id,
@@ -652,9 +751,30 @@ async def eval_project(project_id: str, request: EvalRequest, http_request: Requ
                 }
             )
 
-        total = len(request.cases)
+        total = len(run_cases)
         pass_rate = round(pass_count / total, 4) if total else 0.0
         avg_confidence = round(confidence_sum / total, 4) if total else 0.0
+
+        meets_profile_thresholds = None
+        if profile:
+            min_pass_rate = float(profile.get("min_pass_rate", 0.7))
+            min_confidence = float(profile.get("min_confidence", 0.5))
+            require_citations = bool(profile.get("require_citations", True))
+            strict_abstain = bool(profile.get("strict_abstain", False))
+
+            citation_ok = True
+            abstain_ok = True
+            if require_citations:
+                citation_ok = all((r.get("citations_count", 0) > 0) for r in results)
+            if strict_abstain:
+                abstain_ok = all((not r.get("abstained", False)) for r in results)
+
+            meets_profile_thresholds = (
+                pass_rate >= min_pass_rate
+                and avg_confidence >= min_confidence
+                and citation_ok
+                and abstain_ok
+            )
 
         _append_query_log(
             project_id,
@@ -663,6 +783,9 @@ async def eval_project(project_id: str, request: EvalRequest, http_request: Requ
                 "total_cases": total,
                 "pass_rate": pass_rate,
                 "avg_confidence": avg_confidence,
+                "profile_id": request.profile_id,
+                "dataset_id": request.dataset_id,
+                "meets_profile_thresholds": meets_profile_thresholds,
                 "request_id": getattr(http_request.state, "request_id", None),
             },
         )
@@ -676,9 +799,18 @@ async def eval_project(project_id: str, request: EvalRequest, http_request: Requ
 
         return {
             "project_id": project_id,
+            "profile_id": request.profile_id,
+            "dataset_id": request.dataset_id,
             "total_cases": total,
             "pass_rate": pass_rate,
             "avg_confidence": avg_confidence,
+            "meets_profile_thresholds": meets_profile_thresholds,
+            "profile_thresholds": {
+                "min_pass_rate": profile.get("min_pass_rate") if profile else None,
+                "min_confidence": profile.get("min_confidence") if profile else None,
+                "require_citations": profile.get("require_citations") if profile else None,
+                "strict_abstain": profile.get("strict_abstain") if profile else None,
+            },
             "results": results,
         }
     except Exception:
