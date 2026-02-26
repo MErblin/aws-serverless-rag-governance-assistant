@@ -2,7 +2,7 @@
 DocuChat RAG - RAG Query Service
 
 Handles retrieval and generation using LlamaIndex with per-project isolation.
-Includes a lightweight hybrid retrieval mode (dense + lexical BM25-style scoring).
+Includes lightweight hybrid retrieval + query routing + heuristic reranking.
 """
 
 from __future__ import annotations
@@ -54,6 +54,15 @@ class RAGService:
     def _tokenize(self, text: str) -> list[str]:
         return re.findall(r"[a-zA-Z0-9_]+", text.lower())
 
+    def _route_query(self, question: str) -> str:
+        """Lightweight query router for retrieval strategy tuning."""
+        q = question.lower()
+        if any(k in q for k in ["exact", "clause", "policy", "contract", "invoice", "billing", "section"]):
+            return "lexical_heavy"
+        if any(k in q for k in ["summary", "summarize", "overview", "main points"]):
+            return "dense_heavy"
+        return "balanced"
+
     def _dense_retrieve(self, index: VectorStoreIndex, question: str, top_k: int) -> list[NodeWithScore]:
         retriever = index.as_retriever(similarity_top_k=top_k)
         nodes = retriever.retrieve(question)
@@ -65,10 +74,6 @@ class RAGService:
         question: str,
         top_k: int,
     ) -> list[NodeWithScore]:
-        """
-        Lightweight BM25-style lexical retrieval over indexed nodes.
-        Keeps dependencies minimal while improving keyword precision.
-        """
         query_tokens = self._tokenize(question)
         if not query_tokens:
             return []
@@ -77,7 +82,6 @@ class RAGService:
         if not all_docs:
             return []
 
-        # Build corpus statistics
         node_tokens: dict[str, list[str]] = {}
         doc_freq: dict[str, int] = defaultdict(int)
         avg_doc_len = 0.0
@@ -97,13 +101,10 @@ class RAGService:
 
         n_docs = len(node_tokens)
         avg_doc_len = avg_doc_len / max(1, n_docs)
-
-        # BM25 parameters (standard defaults)
         k1 = 1.5
         b = 0.75
 
         scored: list[tuple[str, float]] = []
-
         for node_id, tokens in node_tokens.items():
             tf = Counter(tokens)
             doc_len = len(tokens)
@@ -132,7 +133,6 @@ class RAGService:
             node = all_docs.get(node_id)
             if node is not None:
                 results.append(NodeWithScore(node=node, score=float(score)))
-
         return results
 
     def _reciprocal_rank_fusion(
@@ -140,31 +140,57 @@ class RAGService:
         dense_nodes: list[NodeWithScore],
         lexical_nodes: list[NodeWithScore],
         top_k: int,
+        route_mode: str,
     ) -> list[NodeWithScore]:
-        """Fuse dense + lexical ranking via Reciprocal Rank Fusion (RRF)."""
         rrf_k = 60
         fused_scores: dict[str, float] = defaultdict(float)
         node_map: dict[str, NodeWithScore] = {}
 
+        dense_weight = 1.0
+        lexical_weight = 1.0
+        if route_mode == "lexical_heavy":
+            lexical_weight = 1.35
+            dense_weight = 0.85
+        elif route_mode == "dense_heavy":
+            dense_weight = 1.35
+            lexical_weight = 0.85
+
         for rank, item in enumerate(dense_nodes, start=1):
             node_id = item.node.node_id
-            fused_scores[node_id] += 1.0 / (rrf_k + rank)
+            fused_scores[node_id] += dense_weight * (1.0 / (rrf_k + rank))
             node_map[node_id] = item
 
         for rank, item in enumerate(lexical_nodes, start=1):
             node_id = item.node.node_id
-            fused_scores[node_id] += 1.0 / (rrf_k + rank)
+            fused_scores[node_id] += lexical_weight * (1.0 / (rrf_k + rank))
             if node_id not in node_map:
                 node_map[node_id] = item
 
         ranked_ids = sorted(fused_scores.keys(), key=lambda nid: fused_scores[nid], reverse=True)
-
         output: list[NodeWithScore] = []
         for node_id in ranked_ids[:top_k]:
             base = node_map[node_id]
             output.append(NodeWithScore(node=base.node, score=float(fused_scores[node_id])))
-
         return output
+
+    def _heuristic_rerank(self, question: str, nodes: list[NodeWithScore], top_k: int) -> list[NodeWithScore]:
+        """CPU-cheap rerank using token overlap + position bonus."""
+        q_tokens = set(self._tokenize(question))
+        if not q_tokens:
+            return nodes[:top_k]
+
+        rescored: list[NodeWithScore] = []
+        for idx, item in enumerate(nodes):
+            text = (getattr(item.node, "text", "") or "")[:1200]
+            t_tokens = set(self._tokenize(text))
+            overlap = len(q_tokens & t_tokens) / max(1, len(q_tokens))
+            base = float(item.score or 0.0)
+            position_bonus = 1.0 / (idx + 1)
+            combined = (0.55 * base) + (0.35 * overlap) + (0.10 * position_bonus)
+            rescored.append(NodeWithScore(node=item.node, score=combined))
+
+        rescored.sort(key=lambda n: float(n.score or 0.0), reverse=True)
+        return rescored[:top_k]
 
     async def query(
         self,
@@ -172,12 +198,6 @@ class RAGService:
         project_id: str,
         include_diagnostics: bool = False,
     ) -> tuple[str, list[dict], float, bool, dict[str, Any] | None]:
-        """
-        Query documents and generate an answer.
-
-        Returns:
-            (answer, citations, confidence, abstained, diagnostics)
-        """
         project = self.project_store.get_project(project_id)
         if not project:
             raise ValueError(f"Project not found: {project_id}")
@@ -194,15 +214,19 @@ class RAGService:
 
         top_k = int(project.get("top_k", 3) or 3)
         system_prompt = project.get("system_prompt") or settings.default_system_prompt
+        route_mode = self._route_query(question)
 
-        dense_nodes = self._dense_retrieve(index, question, max(top_k * 2, top_k))
-        lexical_nodes = self._bm25_like_retrieve(index, question, max(top_k * 2, top_k))
-        fused_nodes = self._reciprocal_rank_fusion(dense_nodes, lexical_nodes, top_k=top_k)
+        candidate_k = max(top_k * 4, top_k)
+        dense_nodes = self._dense_retrieve(index, question, candidate_k)
+        lexical_nodes = self._bm25_like_retrieve(index, question, candidate_k)
+        fused_nodes = self._reciprocal_rank_fusion(dense_nodes, lexical_nodes, top_k=candidate_k, route_mode=route_mode)
+        reranked_nodes = self._heuristic_rerank(question, fused_nodes, top_k=top_k)
 
-        if not fused_nodes:
+        if not reranked_nodes:
             answer = "I don't have enough grounded context in this project's documents to answer confidently."
             return answer, [], 0.0, True, {
-                "retrieval_mode": "hybrid_rrf",
+                "retrieval_mode": "hybrid_rrf_rerank",
+                "route_mode": route_mode,
                 "dense_count": len(dense_nodes),
                 "lexical_count": len(lexical_nodes),
                 "fused_count": 0,
@@ -212,7 +236,7 @@ class RAGService:
         citations: list[dict] = []
         score_values: list[float] = []
 
-        for item in fused_nodes:
+        for item in reranked_nodes:
             node = item.node
             score = float(item.score) if item.score is not None else 0.0
             score = max(0.0, min(1.0, score))
@@ -232,7 +256,7 @@ class RAGService:
             )
 
         confidence = round(sum(score_values) / len(score_values), 4) if score_values else 0.0
-        abstained = confidence < 0.05
+        abstained = confidence < 0.06
 
         if abstained:
             answer = "I don't have enough grounded context in this project's documents to answer confidently."
@@ -250,10 +274,12 @@ class RAGService:
         diagnostics = None
         if include_diagnostics:
             diagnostics = {
-                "retrieval_mode": "hybrid_rrf",
+                "retrieval_mode": "hybrid_rrf_rerank",
+                "route_mode": route_mode,
                 "dense_count": len(dense_nodes),
                 "lexical_count": len(lexical_nodes),
                 "fused_count": len(fused_nodes),
+                "reranked_count": len(reranked_nodes),
                 "top_k": top_k,
             }
 
