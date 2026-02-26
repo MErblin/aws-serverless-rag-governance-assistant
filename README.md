@@ -143,6 +143,16 @@ pytest tests/unit -v
 pytest tests/integration -v
 ```
 
+### Regression checks
+
+```bash
+# Contract-only regression (free, CI-friendly)
+python scripts/run_regression.py --mode mock
+
+# Live regression with profile thresholds (requires local model runtime)
+python scripts/run_regression.py --mode live
+```
+
 ## 📁 Project Structure
 
 ```

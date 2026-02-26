@@ -57,8 +57,14 @@ Per chatbot profile:
 1. Install test deps:
    - `pip install -e ".[dev]"`
 2. Add a `tests/regression/` folder with fixed datasets.
-3. Add a script `scripts/run_regression.py` to call `/eval` with `profile_id + dataset_id`.
-4. Add GitHub Action to run tests + regression gate on PR.
+3. ✅ Added `scripts/run_regression.py` to run profile/dataset regression checks.
+4. ✅ Added GitHub Action `.github/workflows/ci.yml` to run compile/lint/tests + regression gate on PR.
+
+## Regression runner usage
+- Free CI mode (default):
+  - `python scripts/run_regression.py --mode mock`
+- Live quality gate mode (local/staging with Ollama running):
+  - `python scripts/run_regression.py --mode live`
 
 ## Definition of good QA for this project
 - Feature changes always include test updates

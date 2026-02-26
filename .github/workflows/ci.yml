@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - OpenClawTesting
+      - feat/**
+  pull_request:
+    branches:
+      - OpenClawTesting
+      - main
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Compile check
+        run: python -m compileall app
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Tests
+        run: pytest -q
+
+      - name: Regression gate (mock, free CI)
+        run: python scripts/run_regression.py --mode mock
