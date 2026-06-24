@@ -1,0 +1,19 @@
+[Unit]
+Description=GRC RAG Governance Assistant — FastAPI Backend
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/docuchat-rag
+EnvironmentFile=/home/ec2-user/docuchat-rag/.env
+ExecStart=/home/ec2-user/docuchat-rag/.venv/bin/uvicorn app.main:app \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --workers 1 \
+    --log-level info
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

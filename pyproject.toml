@@ -33,6 +33,12 @@ dependencies = [
     
     # Utilities
     "python-dotenv>=1.0.0",
+
+    # LLM Providers
+    "google-generativeai>=0.7.0",
+
+    # AWS SDK
+    "boto3>=1.34.0",
 ]
 
 [project.optional-dependencies]

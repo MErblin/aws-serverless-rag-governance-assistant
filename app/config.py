@@ -35,9 +35,21 @@ class Settings(BaseSettings):
     # Streamlit Settings
     streamlit_port: int = 8501
 
-    # Ollama Settings
+    # LLM Provider — "ollama" | "gemini"
+    llm_provider: str = "gemini"
+
+    # Ollama Settings (used when llm_provider=ollama)
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3.2"
+
+    # Google Gemini Settings (used when llm_provider=gemini)
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-1.5-flash"
+
+    # AWS / S3 Settings
+    aws_region: str = "us-east-1"
+    s3_bucket: str = ""
+    s3_prefix: str = "grc-docs/"
 
     # Embedding Model
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"

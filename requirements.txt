@@ -23,8 +23,11 @@ llama-index-core>=0.10.0
 llama-index-llms-ollama>=0.1.0
 llama-index-embeddings-huggingface>=0.1.0
 
-# Vector Store - Install separately if Python version compatible
-# chromadb>=0.4.22
+# LLM Providers
+google-genai>=1.0.0
+
+# AWS SDK
+boto3>=1.34.0
 
 # Dev dependencies
 pytest>=7.4.0

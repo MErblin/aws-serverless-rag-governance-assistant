@@ -18,7 +18,6 @@ from llama_index.core import StorageContext, VectorStoreIndex, load_index_from_s
 from llama_index.core import Settings as LlamaSettings
 from llama_index.core.schema import NodeWithScore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.llms.ollama import Ollama
 
 from app.config import get_settings
 from app.services.projects import ProjectStore
@@ -34,12 +33,20 @@ class RAGService:
         self.project_store = ProjectStore()
         self.project_store.ensure_default_project()
 
-        LlamaSettings.llm = Ollama(
-            model=settings.ollama_model,
-            base_url=settings.ollama_base_url,
-            request_timeout=120.0,
-        )
+        # Embeddings always run locally (free, no API key needed)
         LlamaSettings.embed_model = HuggingFaceEmbedding(model_name=settings.embedding_model)
+
+        # LLM is provider-dependent — set Ollama only when explicitly requested
+        if settings.llm_provider == "ollama":
+            from llama_index.llms.ollama import Ollama
+            LlamaSettings.llm = Ollama(
+                model=settings.ollama_model,
+                base_url=settings.ollama_base_url,
+                request_timeout=120.0,
+            )
+        else:
+            # Gemini (or any other provider) handles generation outside LlamaIndex
+            LlamaSettings.llm = None  # type: ignore[assignment]
 
     def _load_index(self, index_dir: Path) -> VectorStoreIndex:
         try:
@@ -202,12 +209,15 @@ class RAGService:
         if not project:
             raise ValueError(f"Project not found: {project_id}")
 
-        model = project.get("model") or settings.ollama_model
-        LlamaSettings.llm = Ollama(
-            model=model,
-            base_url=settings.ollama_base_url,
-            request_timeout=120.0,
-        )
+        # Re-initialise LLM per query only when using Ollama (supports per-project model override)
+        if settings.llm_provider == "ollama":
+            from llama_index.llms.ollama import Ollama
+            model = project.get("model") or settings.ollama_model
+            LlamaSettings.llm = Ollama(
+                model=model,
+                base_url=settings.ollama_base_url,
+                request_timeout=120.0,
+            )
 
         paths = self.project_store.get_project_paths(project_id)
         index = self._load_index(paths["index_dir"])
@@ -269,8 +279,12 @@ class RAGService:
                 f"Question: {question}\n"
                 "Answer:"
             )
-            llm_response = LlamaSettings.llm.complete(prompt)
-            answer = str(getattr(llm_response, "text", llm_response))
+            if settings.llm_provider == "gemini":
+                from app.services.gemini_llm import get_gemini_response
+                answer = get_gemini_response(prompt)
+            else:
+                llm_response = LlamaSettings.llm.complete(prompt)
+                answer = str(getattr(llm_response, "text", llm_response))
 
         diagnostics = None
         if include_diagnostics:

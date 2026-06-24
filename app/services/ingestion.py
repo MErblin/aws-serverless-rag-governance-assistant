@@ -78,6 +78,16 @@ class IngestionService:
 
         # Keep original file for auditing/demo traceability
         (documents_dir / filename).write_bytes(file_content)
+
+        # Mirror to S3 if configured (non-blocking — failure won't break ingestion)
+        try:
+            from app.services.s3_client import upload_to_s3
+            s3_key = upload_to_s3(filename, file_content)
+            if s3_key:
+                logger.info("Mirrored to S3: %s", s3_key)
+        except Exception:
+            logger.warning("S3 mirror failed for %s — document still indexed locally", filename)
+
         logger.info("Document indexed", extra={"project_id": project_id, "filename": filename})
 
         return doc.doc_id

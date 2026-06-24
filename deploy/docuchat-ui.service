@@ -1,0 +1,20 @@
+[Unit]
+Description=GRC RAG Governance Assistant — Streamlit UI
+After=network.target docuchat-api.service
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/docuchat-rag
+EnvironmentFile=/home/ec2-user/docuchat-rag/.env
+Environment=API_BASE_URL=http://localhost:8000/api
+ExecStart=/home/ec2-user/docuchat-rag/.venv/bin/streamlit run ui/app.py \
+    --server.port 8501 \
+    --server.address 0.0.0.0 \
+    --server.headless true \
+    --browser.gatherUsageStats false
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

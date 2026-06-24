@@ -47,8 +47,13 @@ htmlcov/
 
 # Data
 data/chroma/
+data/projects/
 *.db
 *.sqlite
+
+# GRC Documents (kept out of version control — store in S3 instead)
+"grc docs/"
+grc-docs/
 
 # Uploads
 uploads/
