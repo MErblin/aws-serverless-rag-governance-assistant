@@ -88,7 +88,7 @@ class IngestionService:
         except Exception:
             logger.warning("S3 mirror failed for %s — document still indexed locally", filename)
 
-        logger.info("Document indexed", extra={"project_id": project_id, "filename": filename})
+        logger.info("Document indexed", extra={"project_id": project_id, "file_name": filename})
 
         return doc.doc_id
 

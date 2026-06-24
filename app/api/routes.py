@@ -431,7 +431,7 @@ async def delete_project_document(project_id: str, filename: str, http_request: 
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception:
-        logger.exception("Failed to delete document", extra={"project_id": project_id, "filename": safe_filename})
+        logger.exception("Failed to delete document", extra={"project_id": project_id, "file_name": safe_filename})
         _append_audit_log(project_id, http_request, "document.delete", "error", {"filename": safe_filename})
         raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -467,7 +467,7 @@ async def upload_document_to_project(project_id: str, file: UploadFile = File(..
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception:
-        logger.exception("Failed to upload document", extra={"project_id": project_id, "filename": filename})
+        logger.exception("Failed to upload document", extra={"project_id": project_id, "file_name": filename})
         if http_request:
             _append_audit_log(project_id, http_request, "document.upload", "error", {"filename": filename})
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -506,7 +506,7 @@ async def batch_upload_documents(project_id: str, files: list[UploadFile] = File
             document_id = await service.process_document(contents, filename, project_id)
             results.append(BatchUploadItem(filename=filename, success=True, document_id=document_id))
         except Exception:
-            logger.exception("Failed batch upload item", extra={"project_id": project_id, "filename": filename})
+            logger.exception("Failed batch upload item", extra={"project_id": project_id, "file_name": filename})
             results.append(BatchUploadItem(filename=filename, success=False, error="Internal server error"))
 
     succeeded = sum(1 for r in results if r.success)
