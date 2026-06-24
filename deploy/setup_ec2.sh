@@ -16,7 +16,7 @@
 
 set -e  # stop on any error
 
-REPO_URL="https://github.com/YOUR_GITHUB_USERNAME/docuchat-rag.git"
+REPO_URL="https://github.com/MErblin/aws-serverless-rag-governance-assistant.git"
 APP_DIR="/home/ec2-user/docuchat-rag"
 VENV_DIR="$APP_DIR/.venv"
 
