@@ -44,7 +44,7 @@ class Settings(BaseSettings):
 
     # Google Gemini Settings (used when llm_provider=gemini)
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-1.5-flash"
+    gemini_model: str = "gemini-3.1-flash-lite"
 
     # AWS / S3 Settings
     aws_region: str = "us-east-1"
